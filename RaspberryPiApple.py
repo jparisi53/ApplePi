@@ -128,7 +128,7 @@ def get_latest_game_id(team_id):
     yesterday = (datetime.now(ZoneInfo("America/New_York")) - timedelta(days=1)).strftime("%Y-%m-%d")
 
     try:
-        schedule_data = api.Schedule.schedule(teamId=team_id, startDate=yesterday, endDate=today)
+        schedule_data = api.Schedule.schedule(teamId=team_id, startDate=yesterday, endDate=today, sportId=1).to_dict()
     except Exception as e:
         print(f"[ERROR] Failed to fetch schedule: {e}")
         return None, None
@@ -176,11 +176,11 @@ def get_latest_game_id(team_id):
 
 
 def fetch_play_data(game_id):
-    return api.Game.playByPlay(game_pk=game_id)
+    return api.Game.playByPlay(game_pk=game_id).to_dict()
 
 
 def get_team_info(game_id):
-    data = api.Game.liveGameV1(game_pk=game_id)
+    data = api.Game.liveGameV1(game_pk=game_id).to_dict()
     home_id = data['gameData']['teams']['home']['id']
     away_id = data['gameData']['teams']['away']['id']
     return home_id, away_id
@@ -250,7 +250,7 @@ def background_loop():
         # Victory trigger once per game
         if status in ["Final", "Game Over"] and game_id not in triggered_wins:
             try:
-                linescore = api.Game.linescore(game_pk=game_id)
+                linescore = api.Game.linescore(game_pk=game_id).to_dict()
                 home_score = linescore.get("teams", {}).get("home", {}).get("runs", 0)
                 away_score = linescore.get("teams", {}).get("away", {}).get("runs", 0)
 
