@@ -11,25 +11,28 @@ import re
 from zoneinfo import ZoneInfo
 from datetime import datetime, timedelta, timezone
 from collections import deque
-from pymlb_statsapi import api
+import pymlb_statsapi
 import RPi.GPIO as GPIO
 
 app = Flask(__name__)
 
 # =====================
+# ---- API Setup ----
+# =====================
+api = pymlb_statsapi.StatsAPI()
+
+# =====================
 # ---- GPIO Setup ----
 # =====================
 # Using GPIO pins 17 and 27 (physical pins 11 and 13)
-# Avoiding pins 1 (3.3V) and 6 (GND) as requested
 IN1_PIN = 17  # GPIO 17 (Physical pin 11) - L298N IN1
 IN2_PIN = 27  # GPIO 27 (Physical pin 13) - L298N IN2
 
-GPIO.setmode(GPIO.BCM)  # Use BCM GPIO numbering
+GPIO.setmode(GPIO.BCM)
 GPIO.setwarnings(False)
 GPIO.setup(IN1_PIN, GPIO.OUT)
 GPIO.setup(IN2_PIN, GPIO.OUT)
 
-# Initialize pins to LOW (motor stopped)
 GPIO.output(IN1_PIN, GPIO.LOW)
 GPIO.output(IN2_PIN, GPIO.LOW)
 
@@ -45,11 +48,10 @@ last_seen_status = ""
 server_start_time = datetime.now(timezone.utc)
 triggered_wins = set()
 
-# Trigger queue + stats
-_trigger_q = deque()                 # FIFO of pending triggers
-_state_lock = threading.Lock()       # Guards queue + simple state
-last_enqueued_at = None              # When we last queued a trigger
-last_triggered_at = None             # When actuator was last activated
+_trigger_q = deque()
+_state_lock = threading.Lock()
+last_enqueued_at = None
+last_triggered_at = None
 
 # =====================
 # ---- MLB Teams UI ----
@@ -92,38 +94,27 @@ MLB_TEAMS = {
 # =====================
 
 def activate_actuator(duration_seconds=10):
-    """
-    Activate the linear actuator:
-    1. Extend for duration_seconds
-    2. Retract for duration_seconds
-    3. Stop
-    """
     global last_triggered_at
-    
+
     try:
         print(f"[ACTUATOR] 🎯 Raising actuator for {duration_seconds} seconds...")
-        
-        # Extend
         GPIO.output(IN1_PIN, GPIO.HIGH)
         GPIO.output(IN2_PIN, GPIO.LOW)
         time.sleep(duration_seconds)
-        
-        # Retract
+
         print(f"[ACTUATOR] 🔽 Retracting actuator for {duration_seconds} seconds...")
         GPIO.output(IN1_PIN, GPIO.LOW)
         GPIO.output(IN2_PIN, GPIO.HIGH)
         time.sleep(duration_seconds)
-        
-        # Stop
+
         GPIO.output(IN1_PIN, GPIO.LOW)
         GPIO.output(IN2_PIN, GPIO.LOW)
-        
+
         last_triggered_at = datetime.utcnow()
         print("[ACTUATOR] ✅ Actuator cycle complete")
-        
+
     except Exception as e:
         print(f"[ERROR] Actuator control failed: {e}")
-        # Ensure motor is stopped on error
         GPIO.output(IN1_PIN, GPIO.LOW)
         GPIO.output(IN2_PIN, GPIO.LOW)
 
@@ -135,7 +126,18 @@ def activate_actuator(duration_seconds=10):
 def get_latest_game_id(team_id):
     today = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
     yesterday = (datetime.now(ZoneInfo("America/New_York")) - timedelta(days=1)).strftime("%Y-%m-%d")
-    schedule = api.schedule(start_date=yesterday, end_date=today, team=team_id)
+
+    try:
+        schedule_data = api.Schedule.schedule(teamId=team_id, startDate=yesterday, endDate=today)
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch schedule: {e}")
+        return None, None
+
+    # The response is a dict with a 'dates' list
+    dates = schedule_data.get("dates", [])
+    games = []
+    for date_entry in dates:
+        games.extend(date_entry.get("games", []))
 
     in_progress_game = None
     doubleheader_game2 = None
@@ -143,22 +145,17 @@ def get_latest_game_id(team_id):
     postponed_game = None
     final_game = None
 
-    for game in schedule:
-        game_id = game.get("game_id")
-        status = game.get("status")
-        try:
-            game_data = api.get("game", {"gamePk": game_id})
-            doubleheader = game_data['gameData']['game'].get('doubleHeader', 'N')
-            gid = game_data['gameData']['game'].get('id', '')
-        except Exception as e:
-            print(f"[WARN] Could not retrieve game details: {e}")
-            continue
+    for game in games:
+        game_id = game.get("gamePk")
+        status = game.get("status", {}).get("detailedState", "")
+        doubleheader = game.get("doubleHeader", "N")
+        game_num = game.get("gameNumber", 1)
 
-        print(f"[DEBUG] Found game ID {game_id} with status '{status}' (DoubleHeader: {doubleheader})")
+        print(f"[DEBUG] Found game ID {game_id} with status '{status}' (DoubleHeader: {doubleheader}, Game#: {game_num})")
 
-        if status == "In Progress" or status.startswith("Manager challenge") or status.startswith("Umpire review"):
+        if status in ("In Progress",) or status.startswith("Manager challenge") or status.startswith("Umpire review"):
             in_progress_game = (game_id, status)
-        elif doubleheader == 'S' and gid.endswith('-2'):
+        elif doubleheader == "S" and game_num == 2:
             print("[INFO] Found doubleheader Game 2")
             doubleheader_game2 = (game_id, status)
         elif status == "Game Over":
@@ -179,18 +176,17 @@ def get_latest_game_id(team_id):
 
 
 def fetch_play_data(game_id):
-    return api.get("game_playByPlay", {"gamePk": game_id})
+    return api.Game.playByPlay(game_pk=game_id)
 
 
 def get_team_info(game_id):
-    data = api.get("game", {"gamePk": game_id})
+    data = api.Game.liveGameV1(game_pk=game_id)
     home_id = data['gameData']['teams']['home']['id']
     away_id = data['gameData']['teams']['away']['id']
     return home_id, away_id
 
 
 def should_skip_event(play):
-    """Return True if play is a non-at-bat filler event that should not be marked as seen."""
     event = play.get("result", {}).get("event", "").lower()
     filler_events = {
         "batter timeout", "mound visit", "injury delay", "manager visit",
@@ -217,22 +213,18 @@ def queue_trigger(reason: str):
 # =====================
 
 def actuator_trigger_loop():
-    """
-    Separate thread that processes the trigger queue and activates the actuator.
-    This ensures actuator activation doesn't block the MLB monitoring loop.
-    """
     while True:
+        trigger = None  # Must initialize before the lock block
         with _state_lock:
             if _trigger_q:
                 trigger = _trigger_q.popleft()
                 reason = trigger.get("reason", "UNKNOWN")
                 print(f"[TRIGGER] Processing trigger: {reason}")
-        
+
         if trigger:
             activate_actuator(duration_seconds=10)
-            trigger = None  # Reset for next iteration
-        
-        time.sleep(1)  # Check queue every second
+
+        time.sleep(1)
 
 
 def background_loop():
@@ -258,17 +250,17 @@ def background_loop():
         # Victory trigger once per game
         if status in ["Final", "Game Over"] and game_id not in triggered_wins:
             try:
-                data = api.get("game", {"gamePk": game_id})
-                home_team_id = data['gameData']['teams']['home']['id']
-                away_team_id = data['gameData']['teams']['away']['id']
-                linescore = data.get("liveData", {}).get("linescore", {})
+                linescore = api.Game.linescore(game_pk=game_id)
                 home_score = linescore.get("teams", {}).get("home", {}).get("runs", 0)
                 away_score = linescore.get("teams", {}).get("away", {}).get("runs", 0)
 
+                # Get team IDs from live game data
+                home_id, away_id = get_team_info(game_id)
+
                 print(f"[FINAL] Final score — Home: {home_score}, Away: {away_score}")
 
-                if ((home_team_id == monitored_team_id and home_score > away_score) or
-                    (away_team_id == monitored_team_id and away_score > home_score)):
+                if ((home_id == monitored_team_id and home_score > away_score) or
+                    (away_id == monitored_team_id and away_score > home_score)):
                     print("[VICTORY] Monitored team won — queueing win trigger")
                     queue_trigger("TEAM_WIN")
                     triggered_wins.add(game_id)
@@ -280,7 +272,6 @@ def background_loop():
             all_plays = data.get("allPlays", [])
             print(f"[DEBUG] Retrieved {len(all_plays)} plays.")
 
-            # Look at the last couple of fully-formed plays for freshness
             for play in all_plays[-3:]:
                 idx = play["about"]["atBatIndex"]
                 desc = play.get("result", {}).get("description", "")
@@ -293,7 +284,7 @@ def background_loop():
 
                 if not desc or not start_str:
                     print("[WAIT] Description not yet available, will check again later.")
-                    continue  # Don't mark as seen
+                    continue
 
                 start_dt = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
                 if start_dt < server_start_time - timedelta(minutes=1):
@@ -401,7 +392,6 @@ def status():
 
 
 def cleanup():
-    """Cleanup GPIO on exit"""
     print("[GPIO] Cleaning up...")
     GPIO.output(IN1_PIN, GPIO.LOW)
     GPIO.output(IN2_PIN, GPIO.LOW)
@@ -410,13 +400,12 @@ def cleanup():
 
 if __name__ == "__main__":
     try:
-        # Start background threads
         threading.Thread(target=background_loop, daemon=True).start()
         threading.Thread(target=actuator_trigger_loop, daemon=True).start()
-        
+
         print("[INFO] Starting Flask server on http://0.0.0.0:5000")
         print(f"[INFO] Monitoring team ID: {monitored_team_id}")
-        
+
         app.run(host="0.0.0.0", port=5000)
     except KeyboardInterrupt:
         print("\n[INFO] Shutting down...")
