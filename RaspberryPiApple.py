@@ -133,8 +133,8 @@ def get_latest_game_id(team_id):
         print(f"[ERROR] Failed to fetch schedule: {e}")
         return None, None
 
-    # The response is a dict with a 'dates' list
-    dates = schedule_data.get("dates", [])
+    # The response wraps the payload under a 'data' key
+    dates = schedule_data.get("data", {}).get("dates", [])
     games = []
     for date_entry in dates:
         games.extend(date_entry.get("games", []))
