@@ -7,7 +7,6 @@ Monitors MLB games and triggers linear actuator for home runs and wins
 from flask import Flask, request, render_template_string, redirect
 import threading
 import time
-import re
 from zoneinfo import ZoneInfo
 from datetime import datetime, timedelta, timezone
 from collections import deque
@@ -302,16 +301,8 @@ def background_loop():
                 is_home_batting = (half_inning == "bottom")
                 batting_team_id = home_id if is_home_batting else away_id
 
-                desc_lower = desc.lower()
-                is_dinger = False
-
-                if "double play" in desc_lower or "triple play" in desc_lower:
-                    print("[SKIP] Double/triple play — not a hit.")
-
-                if "steals" in desc_lower:
-                    print("[SKIP] Stolen base. At-Bat is ongoing")
-                elif re.search(r'\b(homers?)\b', desc_lower) or re.search(r'\b(grand slam?)\b', desc_lower):
-                    is_dinger = True
+                event_type = play.get("result", {}).get("eventType", "").lower()
+                is_dinger = event_type == "home_run"
 
                 if batting_team_id == monitored_team_id and is_dinger:
                     print("[HIT] Dinger detected — queueing trigger")
