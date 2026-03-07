@@ -176,11 +176,11 @@ def get_latest_game_id(team_id):
 
 
 def fetch_play_data(game_id):
-    return api.Game.playByPlay(game_pk=game_id).to_dict()
+    return api.Game.playByPlay(game_pk=game_id).to_dict().get("data", {})
 
 
 def get_team_info(game_id):
-    data = api.Game.liveGameV1(game_pk=game_id).to_dict()
+    data = api.Game.liveGameV1(game_pk=game_id).to_dict().get("data", {})
     home_id = data['gameData']['teams']['home']['id']
     away_id = data['gameData']['teams']['away']['id']
     return home_id, away_id
@@ -250,7 +250,7 @@ def background_loop():
         # Victory trigger once per game
         if status in ["Final", "Game Over"] and game_id not in triggered_wins:
             try:
-                linescore = api.Game.linescore(game_pk=game_id).to_dict()
+                linescore = api.Game.linescore(game_pk=game_id).to_dict().get("data", {})
                 home_score = linescore.get("teams", {}).get("home", {}).get("runs", 0)
                 away_score = linescore.get("teams", {}).get("away", {}).get("runs", 0)
 
@@ -271,6 +271,9 @@ def background_loop():
             data = fetch_play_data(game_id)
             all_plays = data.get("allPlays", [])
             print(f"[DEBUG] Retrieved {len(all_plays)} plays.")
+
+            # Fetch team info once per poll cycle, not once per play
+            home_id, away_id = get_team_info(game_id)
 
             for play in all_plays[-3:]:
                 idx = play["about"]["atBatIndex"]
@@ -297,7 +300,6 @@ def background_loop():
 
                 half_inning = play["about"].get("halfInning")
                 is_home_batting = (half_inning == "bottom")
-                home_id, away_id = get_team_info(game_id)
                 batting_team_id = home_id if is_home_batting else away_id
 
                 desc_lower = desc.lower()
